@@ -1,0 +1,80 @@
+name: Build packages
+run-name: Build ${{ inputs.tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: mklinux release tag, for example v7.0-mk5
+        required: true
+      publish:
+        description: Attach the packages to the release in multikernel/linux
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  TAG: ${{ inputs.tag }}
+  LINUX_REPO: multikernel/linux
+
+jobs:
+  build:
+    name: ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install build dependencies
+        run: sudo scripts/install-deps.sh
+
+      - name: Fetch the kernel source
+        run: git clone --depth 1 --branch "$TAG" "https://github.com/$LINUX_REPO.git" work/linux
+
+      - name: Configure
+        run: scripts/make-config.sh ${{ matrix.arch }} work/linux
+
+      - name: Build
+        run: scripts/build-packages.sh work/linux out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ matrix.arch }}
+          path: out/
+          compression-level: 0
+          if-no-files-found: error
+
+  publish:
+    # Publish whichever architectures built, so one failing does not hold
+    # back the other.
+    if: ${{ inputs.publish && !cancelled() }}
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: packages-*
+          path: out
+          merge-multiple: true
+
+      - name: Upload to the release
+        run: scripts/publish.sh "$TAG" out
+        env:
+          GH_TOKEN: ${{ secrets.LINUX_RELEASE_TOKEN }}
